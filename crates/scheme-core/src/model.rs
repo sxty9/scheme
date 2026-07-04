@@ -108,6 +108,16 @@ impl Pfad {
                 "Segment besteht nur aus Leerraum".to_string(),
             ));
         }
+        // Windows-Laufwerks-Präfix (`C:...`): `PathBuf::push` würde ein solches
+        // Segment als laufwerks-relativ interpretieren und aus der Wurzel
+        // herausspringen. scheme zielt auf Linux, aber die Confinement-Zusage (§3)
+        // soll plattform-unabhängig gelten — daher hier abgewiesen.
+        let b = seg.as_bytes();
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return Err(SchemeError::UngueltigerPfad(format!(
+                "laufwerks-relatives Segment nicht erlaubt: {seg:?}"
+            )));
+        }
         // Reservierte, scheme-interne Namen (§5): das Verzeichnis-Manifest und die
         // atomaren Schreib-Temporärdateien dürfen kein Knoten-Name sein. Der
         // Vergleich ist **case-insensitiv**, damit auch auf case-insensitiven
@@ -312,6 +322,15 @@ mod tests {
         assert!(Pfad::parse("a//b").is_err());
         assert!(Pfad::parse("a/").is_err());
         assert!(Pfad::parse("a/.").is_err());
+    }
+
+    #[test]
+    fn pfad_lehnt_laufwerks_praefix_ab() {
+        // Windows-Confinement (§3): ein Laufwerks-Präfix darf nicht durch.
+        assert!(Pfad::parse("C:evil").is_err());
+        assert!(Pfad::wurzel().verketten("C:evil").is_err());
+        // Aber ein Doppelpunkt mitten im Namen (Linux-übliche Zeitstempel) bleibt gültig.
+        assert!(Pfad::parse("log-12:00:00.txt").is_ok());
     }
 
     #[test]
