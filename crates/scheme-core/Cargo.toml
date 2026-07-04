@@ -1,0 +1,17 @@
+[package]
+name = "scheme-core"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "scheme-Substrat: veränderbarer, klar strukturierter Datenpool als Dateisystembaum-als-Wahrheit mit Pflicht-Beschreibung"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+redb = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
