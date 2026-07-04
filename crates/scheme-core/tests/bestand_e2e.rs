@@ -181,6 +181,21 @@ fn loeschen_ordner_entfernt_teilbaum() {
 }
 
 #[test]
+fn pfad_durch_datei_ist_abwesenheit_kein_fehler() {
+    // §7.1: ein Pfad, der durch eine vorhandene Datei absteigt (ENOTDIR), ist
+    // Abwesenheit — kein Io-Fehler (Review-Fix).
+    let (_td, b) = bestand();
+    b.ablegen(&pfad("a.txt"), beschr("a"), b"X").unwrap();
+    assert_eq!(b.lesen(&pfad("a.txt/x")).unwrap(), None);
+    assert_eq!(b.knoten(&pfad("a.txt/x"), false).unwrap(), None);
+    assert_eq!(b.auflisten(&pfad("a.txt")).unwrap(), Vec::<Pfad>::new());
+    assert!(matches!(
+        b.aktualisieren(&pfad("a.txt/x"), b"y"),
+        Err(SchemeError::NichtGefunden(_))
+    ));
+}
+
+#[test]
 fn auflisten_enumeriert_dateien_sortiert_unter_prefix() {
     let (_td, b) = bestand();
     b.ablegen(&pfad("raum/hardware/computer/anleitung.txt"), beschr("c"), b"1").unwrap();

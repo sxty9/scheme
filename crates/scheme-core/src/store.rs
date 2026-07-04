@@ -307,7 +307,10 @@ impl Bestand {
         }
         match fs::read(&abs) {
             Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            // Abwesenheit ist ein normales Ergebnis (§7.1): nicht vorhanden ODER ein
+            // Pfad, der durch eine vorhandene Datei absteigt (ENOTDIR) ⇒ „nichts",
+            // kein Io-Fehler.
+            Err(e) if ist_abwesenheit(&e) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -526,7 +529,10 @@ impl Bestand {
         match fs::read(&mp) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| SchemeError::ManifestBeschaedigt(format!("{}: {e}", mp.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Manifest::leer()),
+            // Kein Manifest (Verzeichnis existiert nicht) ODER der „Ordner"-Pfad
+            // steigt durch eine Datei ab (ENOTDIR) ⇒ leeres Manifest = Abwesenheit
+            // (§7.1), kein Fehler.
+            Err(e) if ist_abwesenheit(&e) => Ok(Manifest::leer()),
             Err(e) => Err(e.into()),
         }
     }
@@ -568,6 +574,16 @@ impl Bestand {
 
 fn manifest_pfad(dir: &Path) -> PathBuf {
     dir.join(MANIFEST_NAME)
+}
+
+/// Behandelt ein `io::Error` als **Abwesenheit** (§7.1): entweder nicht vorhanden
+/// (`NotFound`) oder ein Pfad, der durch eine vorhandene Datei absteigt
+/// (`NotADirectory`/ENOTDIR). Beides ist ein normales „nichts", kein Io-Fehler.
+fn ist_abwesenheit(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 fn jetzt() -> u64 {
