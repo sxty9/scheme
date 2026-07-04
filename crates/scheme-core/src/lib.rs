@@ -25,14 +25,19 @@
 //!   die Primitive `ablegen`/`ablegen_roh`/`aktualisieren`/`verschieben`/`loeschen`/
 //!   `beschreiben`/`lesen`/`knoten`/`auflisten`/`kinder`/`traversieren` und der
 //!   [`Bestand::leitfaden`] (§9).
+//! - [`index`] — der [`SchemeIndex`] (§8): eine **neu-baubare** redb-Projektion
+//!   `Pfad → Metadaten` für Präfix-Auflistung und Beschreibungs-Suche; reines
+//!   Derivat des Baums, jederzeit verwerf- und neu baubar.
 //! - [`error`] — [`SchemeError`]: rein **mechanische** Zustände (§1), inkl. der
 //!   erzwungenen [`SchemeError::BeschreibungFehlt`] (§4).
 
 pub mod error;
+pub mod index;
 pub mod model;
 pub mod store;
 
 pub use error::{Result, SchemeError};
+pub use index::SchemeIndex;
 pub use model::{Art, Beschreibung, Knoten, Metadaten, Pfad};
 pub use store::{Bestand, EINGANG, LEITFADEN, MANIFEST_NAME};
 

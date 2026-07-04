@@ -59,6 +59,12 @@ pub enum SchemeError {
     /// `write`, `rename`, `fsync` oder Verzeichnis-Vorgang ist fehlgeschlagen.
     #[error("I/O-Fehler des Dateisystembaums (§5)")]
     Io(#[source] std::io::Error),
+
+    /// Fehler des **abgeleiteten** Index (§8). Der Index ist ein reines,
+    /// neu-baubares Derivat des Baums — ein Index-Fehler bedroht die Wahrheit
+    /// (den Baum) nicht; der Index kann verworfen und neu gebaut werden.
+    #[error("Index-Fehler (§8): {0}")]
+    IndexFehler(String),
 }
 
 impl From<std::io::Error> for SchemeError {
