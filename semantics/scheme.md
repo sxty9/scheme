@@ -83,7 +83,8 @@
 Kein Modell-Bestandteil, sondern Umsetzungs-Entscheidungen:
 - **Wiederherstellbarkeit** gelöschter/überschriebener Knoten (Papierkorb, Audit-Spur) — die eine Stelle, an der scheme optional lakearchs append-only Ehrlichkeit borgen könnte.
 - **Index-Technik & Leistung** (Volltext, Caching).
-- **Nebenläufigkeit** über den einen serialisierten Writer hinaus.
+- **Nebenläufigkeit** über den einen serialisierten Writer **innerhalb eines Prozesses** hinaus (mehrere Prozesse auf derselben Wurzel sind nicht koordiniert).
+- **Absturz-Konsistenz mehrschrittiger Mutationen.** Einzelne Datei- und Manifest-Schreibvorgänge sind atomar (§6.1); ein Vorgang, der *mehrere* schreibt (Verschieben über Verzeichnisgrenzen: `rename` + zwei Manifeste), ist in v1 **nicht** transaktional. Ein Absturz im Fenster hinterlässt eine reparierbare Inkonsistenz (verwaiste Datei oder Eintrag), nie Datenverlust; die Reihenfolge ist bewusst so gewählt, dass der Baum die Wahrheit bleibt und ein Index-Neubau (§8) wieder aufräumt. Ein Journal/WAL ist eine offene Betriebsentscheidung.
 - **Netz-/Einbettungs-Topologie** (in-Prozess über die C-ABI, oder der Daemon über gRPC).
 
 ---

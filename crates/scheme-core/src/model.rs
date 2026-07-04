@@ -90,7 +90,15 @@ impl Pfad {
                 "reserviertes Segment nicht erlaubt: {seg:?}"
             )));
         }
-        if seg.chars().any(|c| c == '\\' || c == '\0' || c.is_control()) {
+        // Ein Segment enthält **nie** einen Trenner (`/`) oder `\`, keine NUL und
+        // keine Steuerzeichen. Das `/`-Verbot ist tragend für das Confinement (§3):
+        // `verketten` prüft sein Argument mit dieser Funktion, ohne selbst zu
+        // splitten — ohne dieses Verbot ließe `verketten("../../x")` einen Pfad zu,
+        // der aus der Wurzel herauszeigt.
+        if seg
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
+        {
             return Err(SchemeError::UngueltigerPfad(format!(
                 "unzulässiges Zeichen in Segment: {seg:?}"
             )));
@@ -101,8 +109,11 @@ impl Pfad {
             ));
         }
         // Reservierte, scheme-interne Namen (§5): das Verzeichnis-Manifest und die
-        // atomaren Schreib-Temporärdateien dürfen kein Knoten-Name sein.
-        if seg == ".scheme.json" || seg.ends_with(".scheme-tmp") {
+        // atomaren Schreib-Temporärdateien dürfen kein Knoten-Name sein. Der
+        // Vergleich ist **case-insensitiv**, damit auch auf case-insensitiven
+        // Dateisystemen (macOS/Windows) kein `.SCHEME.JSON` das Manifest verdrängt.
+        let low = seg.to_ascii_lowercase();
+        if low == ".scheme.json" || low.ends_with(".scheme-tmp") {
             return Err(SchemeError::UngueltigerPfad(format!(
                 "reservierter interner Name nicht erlaubt: {seg:?}"
             )));

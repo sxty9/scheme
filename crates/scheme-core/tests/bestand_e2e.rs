@@ -109,6 +109,46 @@ fn move_preserves_content_and_description() {
 }
 
 #[test]
+fn verschieben_in_neuen_unterordner_bleibt_auflistbar() {
+    // Regression: beim Verschieben in einen NEUEN Unterordner desselben Eltern-
+    // verzeichnisses darf der frisch angelegte Ordner-Eintrag nicht durch ein
+    // veraltetes Eltern-Manifest überschrieben werden (§6, Review-Fix).
+    let (_td, b) = bestand();
+    b.ablegen(&pfad("foo.txt"), beschr("foo"), b"X").unwrap();
+    b.verschieben(&pfad("foo.txt"), &pfad("sub/foo.txt")).unwrap();
+
+    // Die Datei ist unter dem neuen Pfad auflistbar …
+    let alle: Vec<String> = b
+        .auflisten(&Pfad::wurzel())
+        .unwrap()
+        .iter()
+        .map(|p| p.als_str().to_string())
+        .collect();
+    assert_eq!(alle, vec!["sub/foo.txt"]);
+    // … und der Ordner „sub" ist im Wurzel-Manifest verzeichnet (nicht verwaist).
+    let wurzelkinder: Vec<String> = b
+        .kinder(&Pfad::wurzel())
+        .unwrap()
+        .iter()
+        .filter_map(|k| k.name().map(str::to_string))
+        .collect();
+    assert!(wurzelkinder.contains(&"sub".to_string()), "sub verwaist: {wurzelkinder:?}");
+    assert_eq!(b.lesen(&pfad("sub/foo.txt")).unwrap().as_deref(), Some(&b"X"[..]));
+}
+
+#[test]
+fn verketten_lehnt_eingebettete_trenner_ab() {
+    // Regression: verketten darf keinen aus der Wurzel herauszeigenden Pfad bauen
+    // (§3-Confinement, Review-Fix).
+    assert!(Pfad::wurzel().verketten("../../etc/passwd").is_err());
+    assert!(Pfad::wurzel().verketten("a/b").is_err());
+    assert!(Pfad::wurzel().verketten(".SCHEME.JSON").is_err());
+    // Und ein regulär geparster Pfad bleibt selbstverständlich innerhalb.
+    let p = Pfad::parse("praesentationsraum/hardware").unwrap();
+    assert!(p.verketten("computer").is_ok());
+}
+
+#[test]
 fn verschieben_auf_belegten_pfad_wird_abgelehnt() {
     let (_td, b) = bestand();
     b.ablegen(&pfad("a/x.txt"), beschr("x"), b"1").unwrap();

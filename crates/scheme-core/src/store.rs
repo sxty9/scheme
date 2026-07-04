@@ -191,27 +191,42 @@ impl Bestand {
         let nach_elter = nach.elter().unwrap();
         let von_elter_abs = self.abs(&von_elter);
 
-        let mut von_m = self.manifest_lesen(&von_elter_abs)?;
-        let meta = von_m
+        // 1. Die Quelle muss existieren — nur die Metadaten kopieren, das Manifest
+        //    NICHT über Schritt 3 hinweg festhalten (§6).
+        let meta = self
+            .manifest_lesen(&von_elter_abs)?
             .kinder
             .get(von_name)
             .ok_or_else(|| SchemeError::NichtGefunden(von.to_string()))?
             .clone();
 
+        // 2. Das Ziel muss frei sein.
         let nach_abs = self.abs(nach);
         if nach_abs.exists() {
             return Err(SchemeError::BereitsVorhanden(nach.to_string()));
         }
+
+        // 3. Ziel-Ordnerkette anlegen. ACHTUNG: dies kann Vorfahren-Manifeste
+        //    verändern — einschließlich `von_elter` (etwa beim Verschieben in einen
+        //    NEUEN Unterordner desselben Elternverzeichnisses). Deshalb werden die
+        //    Manifeste in Schritt 5 **frisch** gelesen (statt eine vor Schritt 3
+        //    gelesene, jetzt veraltete Kopie zurückzuschreiben und den soeben
+        //    angelegten Ordner-Eintrag zu überschreiben).
         self.ordnerkette_sicherstellen(&nach_elter)?;
+
+        // 4. Auf der Platte umbenennen (bewegt bei einem Ordner den ganzen Teilbaum).
         fs::rename(self.abs(von), &nach_abs)?;
 
+        // 5. Manifeste aktualisieren — FRISCH gelesen nach Schritt 3.
         let mut neu_meta = meta;
         neu_meta.geaendert = jetzt();
         if von_elter == nach_elter {
-            von_m.kinder.remove(von_name);
-            von_m.kinder.insert(nach_name.to_string(), neu_meta);
-            self.manifest_schreiben(&von_elter_abs, &von_m)?;
+            let mut m = self.manifest_lesen(&von_elter_abs)?;
+            m.kinder.remove(von_name);
+            m.kinder.insert(nach_name.to_string(), neu_meta);
+            self.manifest_schreiben(&von_elter_abs, &m)?;
         } else {
+            let mut von_m = self.manifest_lesen(&von_elter_abs)?;
             von_m.kinder.remove(von_name);
             self.manifest_schreiben(&von_elter_abs, &von_m)?;
             let nach_elter_abs = self.abs(&nach_elter);
@@ -235,15 +250,19 @@ impl Bestand {
         let elter_abs = self.abs(&pfad.elter().unwrap());
         let mut m = self.manifest_lesen(&elter_abs)?;
         let im_manifest = m.kinder.remove(name).is_some();
+        // Zuerst aus dem Manifest entfernen (aus der Auflistung nehmen), DANN von der
+        // Platte: ein Absturz dazwischen hinterlässt höchstens eine verwaiste,
+        // nicht-gelistete Datei (harmlos) — nie einen „Phantom"-Eintrag, der gelistet
+        // wird, aber keine Datei mehr hat.
+        if im_manifest {
+            self.manifest_schreiben(&elter_abs, &m)?;
+        }
         let abs = self.abs(pfad);
         let im_fs = abs.exists();
         if abs.is_dir() {
             fs::remove_dir_all(&abs)?;
         } else if im_fs {
             fs::remove_file(&abs)?;
-        }
-        if im_manifest {
-            self.manifest_schreiben(&elter_abs, &m)?;
         }
         Ok(im_manifest || im_fs)
     }
@@ -536,6 +555,13 @@ impl Bestand {
             f.sync_all()?;
         }
         fs::rename(&tmp, ziel)?;
+        // Best-effort: das Umbenennen im Elternverzeichnis durabel machen (ein
+        // Verzeichnis-`fsync`), damit der neue Verzeichniseintrag einen Absturz
+        // überlebt. Auf Plattformen, die kein Verzeichnis-`fsync` erlauben, ist der
+        // Fehler folgenlos.
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
         Ok(())
     }
 }
