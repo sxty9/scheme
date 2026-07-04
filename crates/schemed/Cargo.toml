@@ -1,0 +1,32 @@
+[package]
+name = "schemed"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "schemed — der scheme-Daemon: ein Bestand (ein scheme_core::Bestand) hinter der Schreib-Serialisierung, mit den veränderbaren, pfadbasierten scheme-Primitiven über gRPC (tonic)."
+
+[[bin]]
+name = "schemed"
+path = "src/main.rs"
+
+[lib]
+name = "schemed"
+path = "src/lib.rs"
+
+[dependencies]
+scheme-core = { path = "../scheme-core" }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-stream = { version = "0.1", features = ["net"] }

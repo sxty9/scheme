@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+// schemed — der Daemon-Rand. Die Service-Oberfläche exponiert AUSSCHLIESSLICH die
+// veränderbaren, pfadbasierten scheme-Primitive (§6/§7): ablegen (strukturiert
+// oder roh), lesen, aktualisieren, verschieben, löschen, beschreiben, auflisten —
+// plus den Struktur-Leitfaden (§9). KEIN Sortieren/Aggregieren/Ranken/Rechnen am
+// Rand (§1.4): scheme wertet nicht. Die Ausgaben kommen deterministisch nach Pfad
+// geordnet (§7.2) — der Rand ordnet nichts um.
+package scheme.v1;
+
+// -------------------------------------------------------------------- Schreiben
+
+// Strukturiert ablegen (§6): Datei an `path` mit der PFLICHT-Beschreibung
+// `description`. Leere Beschreibung ⇒ InvalidArgument (§4).
+message PutStructuredRequest {
+  string path = 1;
+  string description = 2;
+  bytes data = 3;
+}
+
+// Basis-Ablage ohne Beschreibung (Drop-in, §6.4). Leerer `path` ⇒ deterministisch
+// unter eingang/; sonst Überschreiben an `path`.
+message PutRequest {
+  string path = 1;
+  bytes data = 2;
+}
+
+// Die resultierende Referenz = der (menschenlesbare) Pfad.
+message PutResponse {
+  string path = 1;
+}
+
+// Aktualisieren (§6): überschreibt den Inhalt einer vorhandenen Datei.
+message UpdateRequest {
+  string path = 1;
+  bytes data = 2;
+}
+
+// Verschieben/Umbenennen (§6): re-keyt einen Knoten.
+message RenameRequest {
+  string from = 1;
+  string to = 2;
+}
+
+// Löschen (§6): entfernt einen Knoten (rekursiv bei Ordnern). Idempotent.
+message DeleteRequest {
+  string path = 1;
+}
+message DeleteResponse {
+  bool removed = 1; // true, wenn etwas entfernt wurde; false bei Abwesenheit.
+}
+
+// Beschreiben (§4): setzt/ersetzt die Beschreibung eines Knotens.
+message SetDescriptionRequest {
+  string path = 1;
+  string description = 2;
+}
+
+// ----------------------------------------------------------------------- Lesen
+
+// Lesen (§7): der Inhalt der Datei an `path`.
+message GetRequest {
+  string path = 1;
+}
+message GetResponse {
+  bool present = 1;  // false ⇒ nicht vorhanden/ein Ordner (Abwesenheit ist normal).
+  bytes data = 2;    // die Bytes, falls present.
+}
+
+// Auflisten (§7): die Datei-Pfade unterhalb `prefix` (leer ⇒ ganzer Bestand),
+// deterministisch nach Pfad geordnet (§7.2).
+message ListRequest {
+  string prefix = 1;
+}
+message ListResponse {
+  repeated string paths = 1;
+}
+
+// --------------------------------------------------------------------- Leitfaden
+
+// Der Struktur-Leitfaden (§9): der Text, mit dem scheme dem Agenten mitteilt, dass
+// die Daten klar strukturiert vorliegen und beschrieben werden müssen.
+message DescribeRequest {}
+message DescribeResponse {
+  string guidance = 1;
+}
+
+message Empty {}
+
+// Die Daemon-Service-Oberfläche: NUR scheme-Primitive (§6/§7/§9).
+service Scheme {
+  rpc PutStructured(PutStructuredRequest) returns (PutResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Update(UpdateRequest) returns (Empty);
+  rpc Rename(RenameRequest) returns (Empty);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc SetDescription(SetDescriptionRequest) returns (Empty);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+}
