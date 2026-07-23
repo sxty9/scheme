@@ -1,7 +1,7 @@
 //! Das **opake Bestands-Handle** der C-ABI.
 //!
 //! Maßgeblich: das Gesetzbuch `semantics/scheme.md` (§5/§6 der Bestand hinter
-//! einem serialisierten Writer). Der Aufrufer sieht **nur** einen opaken
+//! einem Lese-Schreib-Schloss). Der Aufrufer sieht **nur** einen opaken
 //! `*mut SchemeHandle`-Pointer. Konstruktion/Freigabe laufen ausschließlich über
 //! [`SchemeHandle::into_raw`]/[`SchemeHandle::drop_raw`] (RAII: genau ein `close`
 //! gibt genau einen `open` frei). Diese Schicht ist

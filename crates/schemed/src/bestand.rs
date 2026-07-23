@@ -1,10 +1,13 @@
 //! Der **Bestand** des Daemons: **ein** geteilter [`scheme_core::Bestand`] hinter
 //! `Arc`, den jede gRPC-Anfrage billig teilt.
 //!
-//! Maßgeblich: `semantics/scheme.md` §5/§6. Der Core-Bestand serialisiert
-//! Schreibvorgänge bereits intern (§6.1); der Daemon muss daher **keine** eigene
-//! Schreib-Pipeline bauen — er reicht jede (blockierende) fs-Operation über
-//! [`tokio::task::spawn_blocking`] an den geteilten Bestand.
+//! Maßgeblich: `semantics/scheme.md` §5/§6. Der Core-Bestand koordiniert Leser und
+//! Schreiber bereits intern über sein Lese-Schreib-Schloss (§6.1): Schreiber
+//! exklusiv/serialisiert, Leser nebenläufig, aber nie gleichzeitig mit einem
+//! Schreiber. Der Daemon muss daher **keine** eigene Zugriffs-Koordination bauen —
+//! er reicht jede (blockierende) fs-Operation über [`tokio::task::spawn_blocking`]
+//! an den geteilten Bestand; nebenläufige gRPC-Anfragen sind dadurch atomar
+//! gegeneinander.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,8 +32,8 @@ impl Bestand {
 
     /// Führt eine blockierende Bestands-Operation auf einem Blocking-Thread aus und
     /// bildet einen [`SchemeError`] auf einen gRPC-[`Status`] ab. Der geteilte
-    /// `Arc<CoreBestand>` wird in die Closure gezogen; die interne Schreib-Sperre
-    /// des Core linearisiert nebenläufige Schreiber (§6.1).
+    /// `Arc<CoreBestand>` wird in die Closure gezogen; das interne Lese-Schreib-
+    /// Schloss des Core serialisiert Schreiber und hält Leser vom Schreiber fern (§6.1).
     pub(crate) async fn run<T, F>(&self, f: F) -> Result<T, Status>
     where
         F: FnOnce(&CoreBestand) -> Result<T, SchemeError> + Send + 'static,

@@ -25,7 +25,7 @@ Das maßgebliche, vollständige Regelwerk ist [`semantics/scheme.md`](semantics/
 ## Aufbau (Rust-Workspace, wie lakearch)
 
 - **`crates/scheme-core`** — das Substrat: der `Bestand` (Dateisystembaum-als-Wahrheit
-  mit `.scheme.json`-Manifesten, serialisiertem Writer, atomaren Schreibvorgängen), das
+  mit `.scheme.json`-Manifesten, Lese-Schreib-Schloss, atomaren Schreibvorgängen), das
   Modell (`Pfad`/`Art`/`Beschreibung`/`Knoten`), der wieder-baubare redb-`SchemeIndex`.
 - **`crates/scheme-ffi`** — die C-ABI (`scheme_ffi.h`) für das In-Prozess-Embedding
   (opake Handles, `catch_unwind`, Puffer-Protokoll). Baut `libscheme_ffi.{a,so}`.

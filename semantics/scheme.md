@@ -46,7 +46,7 @@
 
 ## §6 Das Schreiben
 
-6.1 Alle Mutationen laufen durch **einen serialisierten Writer**. Gleichzeitige Leser sehen nie einen halb geschriebenen Zustand; jeder Datei- und Manifest-Schreibvorgang ist **atomar** (Temp-Datei + `rename`).
+6.1 Alle Zugriffe laufen durch **ein Lese-Schreib-Schloss**: Schreibvorgänge sind **serialisiert** (exklusiv, genau einer zur Zeit), Lesevorgänge laufen **nebenläufig untereinander, aber nie gleichzeitig mit einem Schreibvorgang**. Dadurch ist **jeder** lesende und schreibende Zugriff **atomar und unteilbar** — ein Leser beobachtet **nie** einen Zwischenzustand einer mehrschrittigen Mutation (etwa das `rename` eines Verschiebens vor der Aktualisierung der beteiligten Manifeste, oder die Datei vor ihrem Manifest-Eintrag). Zusätzlich ist jeder einzelne Datei- und Manifest-Schreibvorgang für sich atomar (Temp-Datei + `rename`), so dass selbst ein nicht koordinierter **anderer Prozess** (§12) nie eine halb geschriebene Datei sieht. Die Koordination gilt **prozess-intern** (§12).
 6.2 Die Schreib-Primitive sind: **ablegen** (eine Datei mit Pflicht-Beschreibung schreiben, Elternordner bei Bedarf anlegen), **aktualisieren** (den Inhalt einer vorhandenen Datei überschreiben, Beschreibung bleibt), **verschieben** (einen Knoten re-keyen), **löschen** (einen Knoten, rekursiv bei Ordnern; idempotent) und **beschreiben** (die Beschreibung eines Knotens setzen/ersetzen).
 6.3 Löschen ist **hart** (der Vorgabe nach): der Knoten wird physisch entfernt. scheme „wertet nicht" und hält daher keine Versionshistorie im Modell vor; Wiederherstellbarkeit ist eine optionale Betriebsentscheidung (§12), kein Modell-Bestandteil.
 6.4 **Basis-Vertrag (Drop-in).** Damit scheme am Minimal-Seam (§11) mit lakearch austauschbar bleibt, gibt es ein **rohes Ablegen** ohne Beschreibung: ohne Pfad wird deterministisch unter dem wohlbekannten `eingang/`-Ordner abgelegt (Name aus dem Inhalt abgeleitet), mit Platzhalter-Beschreibung und *unbeschrieben*-Markierung (§4.4); mit Pfad wird überschrieben, eine bereits vorhandene Beschreibung bleibt erhalten. Der **strukturierte** Pfad (mit Pflicht-Beschreibung) ist der eigentlich intendierte; der Basis-Vertrag ist der Fallback.
@@ -83,7 +83,7 @@
 Kein Modell-Bestandteil, sondern Umsetzungs-Entscheidungen:
 - **Wiederherstellbarkeit** gelöschter/überschriebener Knoten (Papierkorb, Audit-Spur) — die eine Stelle, an der scheme optional lakearchs append-only Ehrlichkeit borgen könnte.
 - **Index-Technik & Leistung** (Volltext, Caching).
-- **Nebenläufigkeit** über den einen serialisierten Writer **innerhalb eines Prozesses** hinaus (mehrere Prozesse auf derselben Wurzel sind nicht koordiniert).
+- **Nebenläufigkeit** über das prozess-interne Lese-Schreib-Schloss (§6.1) hinaus: mehrere **Prozesse** auf derselben Wurzel sind nicht koordiniert.
 - **Absturz-Konsistenz mehrschrittiger Mutationen.** Einzelne Datei- und Manifest-Schreibvorgänge sind atomar (§6.1); ein Vorgang, der *mehrere* schreibt (Verschieben über Verzeichnisgrenzen: `rename` + zwei Manifeste), ist in v1 **nicht** transaktional. Ein Absturz im Fenster hinterlässt eine reparierbare Inkonsistenz (verwaiste Datei oder Eintrag), nie Datenverlust; die Reihenfolge ist bewusst so gewählt, dass der Baum die Wahrheit bleibt und ein Index-Neubau (§8) wieder aufräumt. Ein Journal/WAL ist eine offene Betriebsentscheidung.
 - **Netz-/Einbettungs-Topologie** (in-Prozess über die C-ABI, oder der Daemon über gRPC).
 

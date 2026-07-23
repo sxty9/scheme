@@ -41,9 +41,10 @@
   ist am ehrlichsten erfüllt, wenn die Struktur **buchstäblich** das Dateisystem ist.
   Eine eingebettete KV-DB (wie redb bei lakearch) würde die Hierarchie in einer opaken
   Datei verstecken — das Gegenteil des Ziels.
-- **Mutations-Disziplin:** **ein** serialisierter Writer; jeder Datei-/Manifest-
-  Schreibvorgang ist **atomar** (Temp-Datei + `rename`), damit Leser nie einen halben
-  Zustand sehen (§6.1).
+- **Zugriffs-Disziplin:** **ein Lese-Schreib-Schloss** (Schreiber exklusiv/serial-
+  isiert, Leser geteilt); zusätzlich ist jeder Datei-/Manifest-Schreibvorgang für
+  sich **atomar** (Temp-Datei + `rename`), damit Leser nie einen halben Zustand —
+  auch keinen Zwischenstand einer mehrschrittigen Mutation — sehen (§6.1).
 - **Billig revidierbar:** Weil der Baum die Wahrheit ist, ist jeder Index (§8) ein
   wegwerf- und neu-baubares Derivat; das Manifest-Schema kann versioniert wachsen.
 

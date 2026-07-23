@@ -6,17 +6,23 @@
 //! Verzeichnis liegt ein `.scheme.json`-**Manifest**, das jedes Kind auf seine
 //! Metadaten (Art, **Beschreibung**, Größe, Zeitstempel …) abbildet.
 //!
-//! Alle Mutationen (§6) laufen durch **einen serialisierten Writer**
-//! ([`Bestand::schreib_sperre`]); Datei- und Manifest-Schreibvorgänge sind
-//! **atomar** (Temp-Datei + `rename`), so dass Leser nie einen halb-geschriebenen
-//! Zustand sehen. scheme **wertet nicht** (§1): es speichert, strukturiert und
-//! liest zurück — es beurteilt den Inhalt nie.
+//! Alle Zugriffe (§6.1) laufen durch **ein Lese-Schreib-Schloss**
+//! ([`Bestand::sperre`]): Schreibvorgänge sind **serialisiert** (exklusiv, genau
+//! einer zur Zeit), Lesevorgänge laufen **nebenläufig untereinander, aber nie
+//! gleichzeitig mit einem Schreibvorgang**. Dadurch beobachtet ein Leser **nie**
+//! einen Zwischenzustand einer mehrschrittigen Mutation (etwa das `rename` eines
+//! Verschiebens vor der Aktualisierung der beteiligten Manifeste) — jeder Lese- und
+//! jeder Schreibvorgang ist **atomar und unteilbar**. Zusätzlich ist jeder einzelne
+//! Datei- und Manifest-Schreibvorgang für sich atomar (Temp-Datei + `rename`), so
+//! dass auch ein nicht koordinierter **anderer Prozess** (§12) nie eine halb
+//! geschriebene Datei sieht. scheme **wertet nicht** (§1): es speichert,
+//! strukturiert und liest zurück — es beurteilt den Inhalt nie.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -71,10 +77,16 @@ impl Manifest {
 }
 
 /// Der scheme-Store: ein Dateisystembaum-als-Wahrheit unter genau einer Wurzel,
-/// hinter einem serialisierten Writer (§6).
+/// hinter einem Lese-Schreib-Schloss (§6.1).
 pub struct Bestand {
     wurzel: PathBuf,
-    schreib_sperre: Mutex<()>,
+    /// Das **Lese-Schreib-Schloss** (§6.1) über allen Zugriffen: Schreiber nehmen
+    /// es **exklusiv** (serialisiert, genau einer zur Zeit), Leser **geteilt**
+    /// (nebenläufig untereinander, aber nie gleichzeitig mit einem Schreiber). So
+    /// ist jeder Lese- und jeder Schreibvorgang atomar und ohne beobachtbaren
+    /// Zwischenzustand — auch die mehrschrittigen Mutationen (verschieben, ablegen),
+    /// deren Datei- und Manifest-Schritte ein Leser sonst halb-fertig sähe.
+    sperre: RwLock<()>,
 }
 
 impl Bestand {
@@ -84,7 +96,7 @@ impl Bestand {
         fs::create_dir_all(&wurzel)?;
         let b = Bestand {
             wurzel,
-            schreib_sperre: Mutex::new(()),
+            sperre: RwLock::new(()),
         };
         let rp = manifest_pfad(&b.wurzel);
         if !rp.exists() {
@@ -109,7 +121,7 @@ impl Bestand {
     /// der **Pflicht-Beschreibung**. Legt fehlende Elternordner an. Überschreibt
     /// eine vorhandene Datei am Pfad in-place (die Beschreibung wird gesetzt).
     pub fn ablegen(&self, pfad: &Pfad, beschreibung: Beschreibung, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         self.schreibe_datei(pfad, beschreibung.in_string(), false, None, inhalt)
     }
 
@@ -121,7 +133,7 @@ impl Bestand {
     /// „muss beschrieben werden"-Zusage aufzugeben (der strukturierte Pfad ist der
     /// eigentlich intendierte).
     pub fn ablegen_roh(&self, pfad: Option<&Pfad>, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         let pfad = match pfad {
             Some(p) if !p.ist_wurzel() => p.clone(),
             _ => {
@@ -145,7 +157,7 @@ impl Bestand {
     /// **Aktualisieren** (§6): überschreibt den Inhalt einer **vorhandenen** Datei;
     /// die Beschreibung bleibt erhalten. Fehlt der Knoten ⇒ [`SchemeError::NichtGefunden`].
     pub fn aktualisieren(&self, pfad: &Pfad, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         let name = pfad
             .name()
             .ok_or_else(|| SchemeError::UngueltigerPfad("die Wurzel ist keine Datei".into()))?;
@@ -179,7 +191,7 @@ impl Bestand {
     /// von `von` nach `nach`. `nach` muss frei sein; fehlende Ziel-Elternordner
     /// werden angelegt. Der Inhalt und die Beschreibung wandern mit.
     pub fn verschieben(&self, von: &Pfad, nach: &Pfad) -> Result<()> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         if von.ist_wurzel() || nach.ist_wurzel() {
             return Err(SchemeError::UngueltigerPfad(
                 "die Wurzel kann nicht verschoben werden".into(),
@@ -240,7 +252,7 @@ impl Bestand {
     /// **Löschen** (§6): entfernt einen Knoten (eine Datei oder rekursiv einen
     /// Ordner). Idempotent: ein abwesender Knoten liefert `false` ohne Fehler.
     pub fn loeschen(&self, pfad: &Pfad) -> Result<bool> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         if pfad.ist_wurzel() {
             return Err(SchemeError::UngueltigerPfad(
                 "die Wurzel kann nicht gelöscht werden".into(),
@@ -271,7 +283,7 @@ impl Bestand {
     /// Knotens und löscht das `unbeschrieben`-Flag. So kann der Agent einen per
     /// `eingang`-Fallback abgelegten Knoten nachträglich klar einordnen.
     pub fn beschreiben(&self, pfad: &Pfad, beschreibung: Beschreibung) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _schreiber = self.sperre.write().expect("Zugriffs-Sperre vergiftet");
         let name = pfad
             .name()
             .ok_or_else(|| SchemeError::UngueltigerPfad("die Wurzel hat keine Beschreibung".into()))?;
@@ -298,6 +310,15 @@ impl Bestand {
     /// **Lesen** (§7): der Inhalt der Datei an `pfad`. Abwesenheit (oder ein
     /// Ordner) liefert `None` — Abwesenheit ist ein normales Ergebnis, kein Fehler.
     pub fn lesen(&self, pfad: &Pfad) -> Result<Option<Vec<u8>>> {
+        let _leser = self.sperre.read().expect("Zugriffs-Sperre vergiftet");
+        self.lesen_intern(pfad)
+    }
+
+    /// Lese-Kern **ohne** Sperre: erwartet, dass der Aufrufer die (Lese- oder
+    /// Schreib-)Sperre bereits hält. Trennt das Sperren vom Werk, damit
+    /// [`Bestand::knoten`] den Inhalt unter **einer** Sperre mitlesen kann, ohne die
+    /// (nicht wiedereintrittsfähige) Lese-Sperre ein zweites Mal zu nehmen.
+    fn lesen_intern(&self, pfad: &Pfad) -> Result<Option<Vec<u8>>> {
         if pfad.ist_wurzel() {
             return Ok(None);
         }
@@ -317,7 +338,17 @@ impl Bestand {
 
     /// Der **Knoten** an `pfad` mit seinen Metadaten (§7); `mit_inhalt` lädt bei
     /// einer Datei zusätzlich die Bytes. `None`, wenn nichts an dem Pfad liegt.
+    ///
+    /// Metadaten (aus dem Manifest) und Inhalt (aus der Datei) werden unter **einer**
+    /// Lese-Sperre gelesen (§6.1): der zurückgegebene Knoten ist stets in sich
+    /// konsistent (`groesse` passt zum Inhalt), nie durch ein nebenläufiges
+    /// `aktualisieren` zerrissen.
     pub fn knoten(&self, pfad: &Pfad, mit_inhalt: bool) -> Result<Option<Knoten>> {
+        let _leser = self.sperre.read().expect("Zugriffs-Sperre vergiftet");
+        self.knoten_intern(pfad, mit_inhalt)
+    }
+
+    fn knoten_intern(&self, pfad: &Pfad, mit_inhalt: bool) -> Result<Option<Knoten>> {
         let Some(name) = pfad.name() else {
             return Ok(None);
         };
@@ -327,7 +358,7 @@ impl Bestand {
             return Ok(None);
         };
         let inhalt = if mit_inhalt && meta.art == Art::Datei {
-            self.lesen(pfad)?
+            self.lesen_intern(pfad)?
         } else {
             None
         };
@@ -342,6 +373,7 @@ impl Bestand {
     /// sortiert. Das sind genau die per [`Bestand::lesen`] auflösbaren Referenzen
     /// (die Ordner-Struktur liefert [`Bestand::kinder`]/[`Bestand::traversieren`]).
     pub fn auflisten(&self, prefix: &Pfad) -> Result<Vec<Pfad>> {
+        let _leser = self.sperre.read().expect("Zugriffs-Sperre vergiftet");
         let mut out = Vec::new();
         self.sammle_dateien(prefix, &mut out)?;
         out.sort();
@@ -351,6 +383,15 @@ impl Bestand {
     /// Die **direkten Kinder** eines Ordners (§7), als Knoten (ohne Inhalt),
     /// sortiert nach Pfad.
     pub fn kinder(&self, pfad: &Pfad) -> Result<Vec<Knoten>> {
+        let _leser = self.sperre.read().expect("Zugriffs-Sperre vergiftet");
+        self.kinder_intern(pfad)
+    }
+
+    /// Kinder-Kern **ohne** Sperre: erwartet, dass der Aufrufer die Sperre hält.
+    /// So läuft [`Bestand::traversieren`] den ganzen Teilbaum unter **einer**
+    /// Lese-Sperre ab (ein atomarer Schnappschuss), ohne die nicht
+    /// wiedereintrittsfähige Lese-Sperre je Ebene erneut zu nehmen.
+    fn kinder_intern(&self, pfad: &Pfad) -> Result<Vec<Knoten>> {
         let m = self.manifest_lesen(&self.abs(pfad))?;
         let mut out = Vec::with_capacity(m.kinder.len());
         for (name, meta) in &m.kinder {
@@ -375,6 +416,10 @@ impl Bestand {
         max_tiefe: usize,
         max_knoten: usize,
     ) -> Result<Vec<Knoten>> {
+        // Der ganze Teilbaum wird unter **einer** Lese-Sperre abgelaufen: die
+        // Traversierung ist ein atomarer Schnappschuss (§6.1), kein nebenläufiger
+        // Schreiber verschränkt sich hinein.
+        let _leser = self.sperre.read().expect("Zugriffs-Sperre vergiftet");
         let mut out = Vec::new();
         let mut budget = max_knoten;
         self.walk(start, 0, max_tiefe, &mut budget, &mut out)?;
@@ -392,7 +437,7 @@ impl Bestand {
         if tiefe >= max_tiefe || *budget == 0 {
             return Ok(());
         }
-        for k in self.kinder(dir)? {
+        for k in self.kinder_intern(dir)? {
             if *budget == 0 {
                 break;
             }
@@ -545,7 +590,8 @@ impl Bestand {
 
     /// Atomarer Schreibvorgang: Temp-Datei im selben Verzeichnis, `fsync`,
     /// dann `rename` über das Ziel — Leser sehen nie eine halbe Datei. Sicher,
-    /// weil der Writer serialisiert ist (fester Temp-Name je Ziel).
+    /// weil Schreiber die Sperre **exklusiv** halten (§6.1): der feste Temp-Name je
+    /// Ziel kollidiert nie mit einem gleichzeitigen Schreiber.
     fn atomar_schreiben(&self, ziel: &Path, bytes: &[u8]) -> Result<()> {
         let dir = ziel
             .parent()

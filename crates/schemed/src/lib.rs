@@ -15,10 +15,11 @@
 //!
 //! ## Sync-Kern, async-Rand
 //!
-//! [`scheme_core::Bestand`] ist **sync** und serialisiert Schreibvorgänge bereits
-//! intern (ein Writer hinter einer Sperre, §6.1). Der gRPC-Rand ist `tokio`; jede
-//! Operation läuft über [`tokio::task::spawn_blocking`] auf dem geteilten Bestand
-//! (viele nebenläufige Leser; die interne Sperre linearisiert die Schreiber).
+//! [`scheme_core::Bestand`] ist **sync** und koordiniert Zugriffe bereits intern
+//! über ein Lese-Schreib-Schloss (§6.1): Schreiber exklusiv/serialisiert, Leser
+//! nebenläufig, aber nie gleichzeitig mit einem Schreiber. Der gRPC-Rand ist
+//! `tokio`; jede Operation läuft über [`tokio::task::spawn_blocking`] auf dem
+//! geteilten Bestand — nebenläufige Anfragen sind dadurch atomar gegeneinander.
 
 pub mod bestand;
 pub mod service;

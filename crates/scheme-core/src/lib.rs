@@ -21,7 +21,7 @@
 //! - [`model`] — das Datenmodell (§2/§3/§4): [`Pfad`] (Identität), [`Art`]
 //!   (Ordner/Datei), die pflichtige [`Beschreibung`], [`Metadaten`] und [`Knoten`].
 //! - [`store`] — der [`Bestand`] (§5/§6/§7): der Dateisystembaum-als-Wahrheit mit
-//!   `.scheme.json`-Manifesten, serialisiertem Writer und atomaren Schreibvorgängen;
+//!   `.scheme.json`-Manifesten, Lese-Schreib-Schloss und atomaren Schreibvorgängen;
 //!   die Primitive `ablegen`/`ablegen_roh`/`aktualisieren`/`verschieben`/`loeschen`/
 //!   `beschreiben`/`lesen`/`knoten`/`auflisten`/`kinder`/`traversieren` und der
 //!   [`Bestand::leitfaden`] (§9).
