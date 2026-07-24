@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,7 @@ impl Bestand {
     /// der **Pflicht-Beschreibung**. Legt fehlende Elternordner an. Überschreibt
     /// eine vorhandene Datei am Pfad in-place (die Beschreibung wird gesetzt).
     pub fn ablegen(&self, pfad: &Pfad, beschreibung: Beschreibung, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         self.schreibe_datei(pfad, beschreibung.in_string(), false, None, inhalt)
     }
 
@@ -121,7 +121,7 @@ impl Bestand {
     /// „muss beschrieben werden"-Zusage aufzugeben (der strukturierte Pfad ist der
     /// eigentlich intendierte).
     pub fn ablegen_roh(&self, pfad: Option<&Pfad>, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         let pfad = match pfad {
             Some(p) if !p.ist_wurzel() => p.clone(),
             _ => {
@@ -145,7 +145,7 @@ impl Bestand {
     /// **Aktualisieren** (§6): überschreibt den Inhalt einer **vorhandenen** Datei;
     /// die Beschreibung bleibt erhalten. Fehlt der Knoten ⇒ [`SchemeError::NichtGefunden`].
     pub fn aktualisieren(&self, pfad: &Pfad, inhalt: &[u8]) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         let name = pfad
             .name()
             .ok_or_else(|| SchemeError::UngueltigerPfad("die Wurzel ist keine Datei".into()))?;
@@ -179,7 +179,7 @@ impl Bestand {
     /// von `von` nach `nach`. `nach` muss frei sein; fehlende Ziel-Elternordner
     /// werden angelegt. Der Inhalt und die Beschreibung wandern mit.
     pub fn verschieben(&self, von: &Pfad, nach: &Pfad) -> Result<()> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         if von.ist_wurzel() || nach.ist_wurzel() {
             return Err(SchemeError::UngueltigerPfad(
                 "die Wurzel kann nicht verschoben werden".into(),
@@ -240,7 +240,7 @@ impl Bestand {
     /// **Löschen** (§6): entfernt einen Knoten (eine Datei oder rekursiv einen
     /// Ordner). Idempotent: ein abwesender Knoten liefert `false` ohne Fehler.
     pub fn loeschen(&self, pfad: &Pfad) -> Result<bool> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         if pfad.ist_wurzel() {
             return Err(SchemeError::UngueltigerPfad(
                 "die Wurzel kann nicht gelöscht werden".into(),
@@ -271,7 +271,7 @@ impl Bestand {
     /// Knotens und löscht das `unbeschrieben`-Flag. So kann der Agent einen per
     /// `eingang`-Fallback abgelegten Knoten nachträglich klar einordnen.
     pub fn beschreiben(&self, pfad: &Pfad, beschreibung: Beschreibung) -> Result<Knoten> {
-        let _sperre = self.schreib_sperre.lock().expect("Schreib-Sperre vergiftet");
+        let _sperre = self.sperre();
         let name = pfad
             .name()
             .ok_or_else(|| SchemeError::UngueltigerPfad("die Wurzel hat keine Beschreibung".into()))?;
@@ -420,6 +420,22 @@ impl Bestand {
     }
 
     // ------------------------------------------------------------------ intern
+
+    /// Nimmt den **einen serialisierten Writer** (§6.1) und **erholt sich von einer
+    /// Vergiftung**. Panickt ein Schreiber mitten in einer Mutation, während er die
+    /// Sperre hält, markiert `std::sync::Mutex` sie als *vergiftet*. Ein solcher
+    /// Panic ist — wie ein Absturz im mehrschrittigen Schreibfenster (§12) —
+    /// höchstens eine **reparierbare Inkonsistenz, nie Datenverlust** (jeder einzelne
+    /// Datei-/Manifest-Schreibvorgang ist atomar, §6.1). scheme bricht den
+    /// Schreibpfad deshalb **nicht dauerhaft** ab, sondern übernimmt die Sperre und
+    /// fährt fort — der nächste atomare Schreibvorgang heilt selbst. Andernfalls
+    /// legte ein einziger transienter Panic **alle** künftigen Schreibvorgänge
+    /// dauerhaft lahm.
+    fn sperre(&self) -> MutexGuard<'_, ()> {
+        self.schreib_sperre
+            .lock()
+            .unwrap_or_else(|vergiftet| vergiftet.into_inner())
+    }
 
     /// Absoluter Plattenpfad eines Knotens. Da [`Pfad`] `..`/absolut ausschließt,
     /// bleibt das Ergebnis stets unter der Wurzel (Confinement per Konstruktion).
@@ -623,4 +639,40 @@ fn mime_aus_name(name: &str) -> Option<String> {
         _ => return None,
     };
     Some(m.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use tempfile::TempDir;
+
+    /// §6/§12: Ein Schreiber, der **mit gehaltener Sperre** panickt, vergiftet den
+    /// `Mutex`. Ein solcher Panic ist — wie ein Absturz im mehrschrittigen Schreib-
+    /// fenster — höchstens eine **reparierbare** Inkonsistenz, nie Datenverlust.
+    /// scheme darf den Schreibpfad deshalb **nicht dauerhaft** lahmlegen: die Sperre
+    /// erholt sich von der Vergiftung, und der nächste atomare Schreibvorgang heilt
+    /// selbst (Self-Healing). (Die Panik-Meldung auf stderr ist erwartet.)
+    #[test]
+    fn schreib_sperre_erholt_sich_von_vergiftung() {
+        let td = TempDir::new().unwrap();
+        let b = Bestand::oeffnen(td.path()).unwrap();
+
+        // Vergifte die Sperre absichtlich: Panic, während die Sperre gehalten wird.
+        let ergebnis = catch_unwind(AssertUnwindSafe(|| {
+            let _gehalten = b.sperre();
+            panic!("simulierter Schreiber-Absturz mit gehaltener Sperre");
+        }));
+        assert!(ergebnis.is_err(), "der Panic hätte propagieren müssen");
+        assert!(
+            b.schreib_sperre.is_poisoned(),
+            "die Sperre sollte nach dem Panic vergiftet sein"
+        );
+
+        // Trotz Vergiftung muss ein Schreibvorgang weiter funktionieren.
+        let pfad = Pfad::parse("nach/vergiftung.txt").unwrap();
+        b.ablegen(&pfad, Beschreibung::neu("nach der Vergiftung abgelegt").unwrap(), b"lebt")
+            .expect("Schreiben muss die Vergiftung überleben (Self-Healing)");
+        assert_eq!(b.lesen(&pfad).unwrap().as_deref(), Some(&b"lebt"[..]));
+    }
 }
