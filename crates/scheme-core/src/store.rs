@@ -6,17 +6,22 @@
 //! Verzeichnis liegt ein `.scheme.json`-**Manifest**, das jedes Kind auf seine
 //! Metadaten (Art, **Beschreibung**, Größe, Zeitstempel …) abbildet.
 //!
-//! Alle Mutationen (§6) laufen durch **einen serialisierten Writer**
-//! ([`Bestand::schreib_sperre`]); Datei- und Manifest-Schreibvorgänge sind
-//! **atomar** (Temp-Datei + `rename`), so dass Leser nie einen halb-geschriebenen
-//! Zustand sehen. scheme **wertet nicht** (§1): es speichert, strukturiert und
-//! liest zurück — es beurteilt den Inhalt nie.
+//! Alle Zugriffe (§6.1) laufen durch **ein Zugriffs-Schloss**
+//! ([`Bestand::zugriffs_sperre`]): Mutationen nehmen es **exklusiv** (der eine
+//! serialisierte Writer), Leser, die **mehrere** Dateien/Manifeste überspannen,
+//! nehmen es **geteilt**. So beobachtet ein in-Prozess-Leser **nie** den
+//! Zwischenzustand einer mehrschrittigen Mutation — jeder Lese- wie Schreibzugriff
+//! ist als Ganzes **atomar** (unteilbar, ohne beobachtbaren Zwischenzustand).
+//! Zusätzlich ist jeder einzelne Datei- und Manifest-Schreibvorgang für sich
+//! atomar (Temp-Datei + `rename`), so dass auch prozess-fremde Leser nie eine halb
+//! geschriebene Datei sehen. scheme **wertet nicht** (§1): es speichert,
+//! strukturiert und liest zurück — es beurteilt den Inhalt nie.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -71,10 +76,11 @@ impl Manifest {
 }
 
 /// Der scheme-Store: ein Dateisystembaum-als-Wahrheit unter genau einer Wurzel,
-/// hinter einem serialisierten Writer (§6).
+/// hinter einem Zugriffs-Schloss (§6.1): ein serialisierter Writer und dagegen
+/// koordinierte, mehr-Datei-überspannende Leser.
 pub struct Bestand {
     wurzel: PathBuf,
-    schreib_sperre: Mutex<()>,
+    zugriffs_sperre: RwLock<()>,
 }
 
 impl Bestand {
@@ -84,7 +90,7 @@ impl Bestand {
         fs::create_dir_all(&wurzel)?;
         let b = Bestand {
             wurzel,
-            schreib_sperre: Mutex::new(()),
+            zugriffs_sperre: RwLock::new(()),
         };
         let rp = manifest_pfad(&b.wurzel);
         if !rp.exists() {
@@ -297,6 +303,14 @@ impl Bestand {
 
     /// **Lesen** (§7): der Inhalt der Datei an `pfad`. Abwesenheit (oder ein
     /// Ordner) liefert `None` — Abwesenheit ist ein normales Ergebnis, kein Fehler.
+    ///
+    /// **Ohne Lese-Sperre**: ein Zugriff auf **eine** Datei überspannt nichts und ist
+    /// für sich atomar (§6.1). Der Inhalt wird per Temp-Datei + `rename` geschrieben,
+    /// so dass `fs::read` stets einen kohärenten Inode öffnet — nie eine in-place halb
+    /// überschriebene Datei. Die Lese-Sperre nehmen nur die **mehr-Objekt**-Leser
+    /// ([`Bestand::knoten`] mit Inhalt, [`Bestand::auflisten`],
+    /// [`Bestand::traversieren`]); sie hier zu nehmen brächte keinen Atomaritäts-
+    /// gewinn, nur unnötige Latenz auf dem heißen Einzeldatei-Lesepfad.
     pub fn lesen(&self, pfad: &Pfad) -> Result<Option<Vec<u8>>> {
         if pfad.ist_wurzel() {
             return Ok(None);
@@ -318,6 +332,11 @@ impl Bestand {
     /// Der **Knoten** an `pfad` mit seinen Metadaten (§7); `mit_inhalt` lädt bei
     /// einer Datei zusätzlich die Bytes. `None`, wenn nichts an dem Pfad liegt.
     pub fn knoten(&self, pfad: &Pfad, mit_inhalt: bool) -> Result<Option<Knoten>> {
+        // Mit `mit_inhalt` überspannt ein Knoten **Manifest + Datei** (zwei Objekte),
+        // die als **ein** atomarer Zugriff zusammenpassen müssen (§6.1) — deshalb dann
+        // unter der Lese-Sperre. Ohne Inhalt ist es ein Einzel-Manifest-Lesevorgang,
+        // der (Temp + `rename`) für sich atomar ist und keine Sperre braucht.
+        let _sperre = mit_inhalt.then(|| self.lese_sperre());
         let Some(name) = pfad.name() else {
             return Ok(None);
         };
@@ -342,6 +361,10 @@ impl Bestand {
     /// sortiert. Das sind genau die per [`Bestand::lesen`] auflösbaren Referenzen
     /// (die Ordner-Struktur liefert [`Bestand::kinder`]/[`Bestand::traversieren`]).
     pub fn auflisten(&self, prefix: &Pfad) -> Result<Vec<Pfad>> {
+        // Auflisten überspannt viele Manifeste (rekursiv) — als **ein** atomarer
+        // Zugriff (§6.1) unter der Lese-Sperre, damit kein gleichzeitiger Schreiber
+        // eine halb verschobene/gelöschte Zwischensicht durchreicht.
+        let _sperre = self.lese_sperre();
         let mut out = Vec::new();
         self.sammle_dateien(prefix, &mut out)?;
         out.sort();
@@ -350,6 +373,11 @@ impl Bestand {
 
     /// Die **direkten Kinder** eines Ordners (§7), als Knoten (ohne Inhalt),
     /// sortiert nach Pfad.
+    ///
+    /// **Ohne Lese-Sperre**: die Kinder stammen aus **einem** Manifest, das atomar
+    /// (Temp + `rename`) geschrieben wird — ein Einzel-Objekt-Lesevorgang ist für sich
+    /// atomar (§6.1). Erst das **mehr-Manifest**-`traversieren`/`auflisten` nimmt die
+    /// Sperre.
     pub fn kinder(&self, pfad: &Pfad) -> Result<Vec<Knoten>> {
         let m = self.manifest_lesen(&self.abs(pfad))?;
         let mut out = Vec::with_capacity(m.kinder.len());
@@ -375,6 +403,9 @@ impl Bestand {
         max_tiefe: usize,
         max_knoten: usize,
     ) -> Result<Vec<Knoten>> {
+        // Der Teilbaum-Lauf überspannt viele Manifeste — als **ein** atomarer
+        // Zugriff (§6.1) unter der Lese-Sperre.
+        let _sperre = self.lese_sperre();
         let mut out = Vec::new();
         let mut budget = max_knoten;
         self.walk(start, 0, max_tiefe, &mut budget, &mut out)?;
@@ -392,6 +423,8 @@ impl Bestand {
         if tiefe >= max_tiefe || *budget == 0 {
             return Ok(());
         }
+        // `walk` läuft unter der Lese-Sperre von [`Bestand::traversieren`]; das
+        // sperren-freie [`Bestand::kinder`] fügt keine re-entrante Sperre hinzu.
         for k in self.kinder(dir)? {
             if *budget == 0 {
                 break;
@@ -421,19 +454,39 @@ impl Bestand {
 
     // ------------------------------------------------------------------ intern
 
-    /// Nimmt den **einen serialisierten Writer** (§6.1) und **erholt sich von einer
-    /// Vergiftung**. Panickt ein Schreiber mitten in einer Mutation, während er die
-    /// Sperre hält, markiert `std::sync::Mutex` sie als *vergiftet*. Ein solcher
-    /// Panic ist — wie ein Absturz im mehrschrittigen Schreibfenster (§12) —
-    /// höchstens eine **reparierbare Inkonsistenz, nie Datenverlust** (jeder einzelne
-    /// Datei-/Manifest-Schreibvorgang ist atomar, §6.1). scheme bricht den
-    /// Schreibpfad deshalb **nicht dauerhaft** ab, sondern übernimmt die Sperre und
-    /// fährt fort — der nächste atomare Schreibvorgang heilt selbst. Andernfalls
-    /// legte ein einziger transienter Panic **alle** künftigen Schreibvorgänge
-    /// dauerhaft lahm.
-    fn sperre(&self) -> MutexGuard<'_, ()> {
-        self.schreib_sperre
-            .lock()
+    /// Nimmt den **Schreib-Teil** des Zugriffs-Schlosses (§6.1): den **einen
+    /// serialisierten Writer** — exklusiv, schließt alle anderen Schreiber und alle
+    /// koordinierten Leser aus, so dass eine Mutation als Ganzes atomar ist.
+    ///
+    /// **Erholt sich von einer Vergiftung.** Panickt ein Schreiber mitten in einer
+    /// Mutation, während er die Sperre hält, markiert `std::sync::RwLock` sie als
+    /// *vergiftet*. Ein solcher Panic ist — wie ein Absturz im mehrschrittigen
+    /// Schreibfenster (§12) — höchstens eine **reparierbare Inkonsistenz, nie
+    /// Datenverlust** (jeder einzelne Datei-/Manifest-Schreibvorgang ist atomar,
+    /// §6.1). scheme bricht den Schreibpfad deshalb **nicht dauerhaft** ab, sondern
+    /// übernimmt die Sperre und fährt fort — der nächste atomare Schreibvorgang heilt
+    /// selbst. Andernfalls legte ein einziger transienter Panic **alle** künftigen
+    /// Schreibvorgänge dauerhaft lahm.
+    fn sperre(&self) -> RwLockWriteGuard<'_, ()> {
+        self.zugriffs_sperre
+            .write()
+            .unwrap_or_else(|vergiftet| vergiftet.into_inner())
+    }
+
+    /// Nimmt den **Lese-Teil** des Zugriffs-Schlosses (§6.1): geteilt — viele Leser
+    /// gleichzeitig, aber **kein** Schreiber, solange ein Leser liest. Das ist die
+    /// Umsetzung von *Atomare Zugriffe* für Leser, die **mehr als ein** Filesystem-
+    /// Objekt (Datei bzw. Manifest) überspannen und deshalb nicht schon durch die
+    /// Einzel-Objekt-Atomarität (Temp + `rename`) gedeckt sind: [`Bestand::knoten`]
+    /// **mit Inhalt** (Manifest + Datei), [`Bestand::auflisten`] und
+    /// [`Bestand::traversieren`] (viele Manifeste). Sie beobachten so nie den
+    /// Zwischenzustand einer mehrschrittigen Mutation (etwa ein Verschieben über
+    /// Verzeichnisgrenzen: ein `rename` plus zwei Manifest-Schreibvorgänge). Einzel-
+    /// Objekt-Leser ([`Bestand::lesen`], [`Bestand::kinder`], Metadaten-`knoten`)
+    /// brauchen sie **nicht**. Erholt sich wie [`Bestand::sperre`] von einer Vergiftung.
+    fn lese_sperre(&self) -> RwLockReadGuard<'_, ()> {
+        self.zugriffs_sperre
+            .read()
             .unwrap_or_else(|vergiftet| vergiftet.into_inner())
     }
 
@@ -647,32 +700,40 @@ mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tempfile::TempDir;
 
-    /// §6/§12: Ein Schreiber, der **mit gehaltener Sperre** panickt, vergiftet den
-    /// `Mutex`. Ein solcher Panic ist — wie ein Absturz im mehrschrittigen Schreib-
+    /// §6/§12: Ein Schreiber, der **mit gehaltener Sperre** panickt, vergiftet das
+    /// `RwLock`. Ein solcher Panic ist — wie ein Absturz im mehrschrittigen Schreib-
     /// fenster — höchstens eine **reparierbare** Inkonsistenz, nie Datenverlust.
-    /// scheme darf den Schreibpfad deshalb **nicht dauerhaft** lahmlegen: die Sperre
-    /// erholt sich von der Vergiftung, und der nächste atomare Schreibvorgang heilt
-    /// selbst (Self-Healing). (Die Panik-Meldung auf stderr ist erwartet.)
+    /// scheme darf den Zugriffspfad deshalb **nicht dauerhaft** lahmlegen: Schreib-
+    /// **und** Lese-Sperre erholen sich von der Vergiftung, und der nächste atomare
+    /// Schreibvorgang heilt selbst (Self-Healing). (Die Panik-Meldung auf stderr ist
+    /// erwartet.)
     #[test]
     fn schreib_sperre_erholt_sich_von_vergiftung() {
         let td = TempDir::new().unwrap();
         let b = Bestand::oeffnen(td.path()).unwrap();
 
-        // Vergifte die Sperre absichtlich: Panic, während die Sperre gehalten wird.
+        // Vergifte die Sperre absichtlich: Panic, während die Schreib-Sperre
+        // gehalten wird (vergiftet beim RwLock beide Seiten).
         let ergebnis = catch_unwind(AssertUnwindSafe(|| {
             let _gehalten = b.sperre();
             panic!("simulierter Schreiber-Absturz mit gehaltener Sperre");
         }));
         assert!(ergebnis.is_err(), "der Panic hätte propagieren müssen");
         assert!(
-            b.schreib_sperre.is_poisoned(),
+            b.zugriffs_sperre.is_poisoned(),
             "die Sperre sollte nach dem Panic vergiftet sein"
         );
 
-        // Trotz Vergiftung muss ein Schreibvorgang weiter funktionieren.
+        // Trotz Vergiftung muss ein Schreibvorgang (Schreib-Sperre) weiter funktionieren …
         let pfad = Pfad::parse("nach/vergiftung.txt").unwrap();
         b.ablegen(&pfad, Beschreibung::neu("nach der Vergiftung abgelegt").unwrap(), b"lebt")
             .expect("Schreiben muss die Vergiftung überleben (Self-Healing)");
-        assert_eq!(b.lesen(&pfad).unwrap().as_deref(), Some(&b"lebt"[..]));
+        // … und ein Knoten-Lesevorgang *mit Inhalt*, der die **Lese-Sperre** nimmt,
+        // ebenso (die Vergiftung trifft beim RwLock beide Seiten).
+        let k = b
+            .knoten(&pfad, true)
+            .expect("Lesen muss die Vergiftung überleben (Self-Healing)")
+            .expect("der eben abgelegte Knoten ist vorhanden");
+        assert_eq!(k.inhalt.as_deref(), Some(&b"lebt"[..]));
     }
 }

@@ -1,9 +1,12 @@
 //! Tests der **Daten-Integrität** — die beiden tragenden Axiome des Substrats:
 //!
-//! - **Atomare Zugriffe** (§6.1): alle Mutationen laufen durch *einen*
-//!   serialisierten Writer; jeder Datei-/Manifest-Schreibvorgang ist atomar
-//!   (Temp-Datei + `rename`), sodass gleichzeitige Leser **nie** einen halb
-//!   geschriebenen Zustand sehen.
+//! - **Atomare Zugriffe** (§6.1): alle Zugriffe laufen durch *ein* Zugriffs-Schloss
+//!   — Mutationen exklusiv (der eine serialisierte Writer), mehr-Datei-überspannende
+//!   Leser geteilt. Jeder Datei-/Manifest-Schreibvorgang ist zudem für sich atomar
+//!   (Temp-Datei + `rename`). So sieht ein gleichzeitiger Leser **nie** einen halb
+//!   geschriebenen Zustand — weder eine zerrissene *einzelne* Datei noch den
+//!   Zwischenzustand einer *mehrschrittigen* Mutation (Verschieben über
+//!   Verzeichnisgrenzen).
 //! - **Passiver Speicher** (§1.4): scheme **wertet/sortiert nicht** — es ordnet
 //!   Ausgaben allein deterministisch nach **Pfad**, unabhängig vom Wert.
 //!
@@ -137,6 +140,94 @@ fn leser_sieht_nie_zerrissenen_wert_beim_aktualisieren() {
     stop.store(true, Ordering::Relaxed);
     let runden = schreiber.join().unwrap();
     assert!(runden > 0, "der Schreiber lief nicht — Test beweist nichts");
+}
+
+/// §6.1 / „ohne beobachtbaren Zwischenzustand" — die **mehrschrittige** Mutation.
+/// Ein `verschieben` über Verzeichnisgrenzen ist intern **kein** einzelner
+/// atomarer Schritt: es ist ein `rename` plus **zwei** getrennte Manifest-Schreib-
+/// vorgänge (Quelle raus, Ziel rein). Ein Leser, der **nicht** gegen den Schreiber
+/// koordiniert ist, kann diesen Vorgang auf halbem Weg beobachten — etwa ein
+/// Manifest, das die Datei noch listet, während sie auf der Platte bereits am neuen
+/// Ort liegt. Dieser Test hält die Zusage *jeder Lesezugriff ist als Ganzes atomar*
+/// unter echter Nebenläufigkeit fest.
+///
+/// Geprüft werden ausschließlich **Einzelaufruf-Invarianten** (zwei getrennte
+/// Aufrufe zu vergleichen wäre ein Test-eigener Wettlauf, der auch mit der Sperre
+/// bräche):
+/// - `knoten(pfad, mit_inhalt=true)` liest Manifest **und** Inhalt unter *einer*
+///   Lese-Sperre: sagt das Ergebnis „Datei da", MUSS der Inhalt vollständig
+///   vorliegen — nie `None` (der Zerriss-Zustand, den ein sperrenloser Leser
+///   zwischen `rename` und Manifest-Aktualisierung sähe).
+/// - `auflisten` zeigt die Datei an **genau einem** Ort (nie null, nie zwei).
+#[test]
+fn leser_sieht_verschieben_nie_auf_halbem_weg() {
+    let td = TempDir::new().unwrap();
+    let b = Arc::new(Bestand::oeffnen(td.path()).unwrap());
+    let a_pfad = p("a/x.txt");
+    let b_pfad = p("b/x.txt");
+    let nutzlast = b"NUTZLAST-die-vollstaendig-vorliegen-muss".to_vec();
+    b.ablegen(&a_pfad, d("umkämpfte Datei, wandert zwischen a/ und b/"), &nutzlast)
+        .unwrap();
+
+    // Der **Leser** läuft nebenläufig und prüft die Atomaritäts-Invariante Runde um
+    // Runde, bis der Schreiber (unten, begrenzt) das Ende signalisiert.
+    let stop = Arc::new(AtomicBool::new(false));
+    let leser = {
+        let b = Arc::clone(&b);
+        let a_pfad = a_pfad.clone();
+        let b_pfad = b_pfad.clone();
+        let nutzlast = nutzlast.clone();
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut runden = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                for pfad in [&a_pfad, &b_pfad] {
+                    if let Some(k) = b.knoten(pfad, true).unwrap() {
+                        assert_eq!(k.art(), Art::Datei);
+                        assert_eq!(
+                            k.inhalt.as_deref(),
+                            Some(&nutzlast[..]),
+                            "Knoten an {pfad}: Manifest listet die Datei, aber der Inhalt fehlt/ist \
+                             zerrissen — der Zwischenzustand eines Verschiebens wurde beobachtet"
+                        );
+                    }
+                }
+                // Die Datei existiert stets an genau einem Ort — die Auflistung (viele
+                // Manifeste) darf nie null oder zwei Vorkommen zeigen.
+                let liste = b.auflisten(&Pfad::wurzel()).unwrap();
+                assert_eq!(
+                    liste.len(),
+                    1,
+                    "Auflistung zeigt die Datei nicht an genau einem Ort: {:?}",
+                    liste.iter().map(|q| q.als_str().to_string()).collect::<Vec<_>>()
+                );
+                runden += 1;
+                // Dem Schreiber ein Fortschritts-Fenster geben (sonst könnte der Leser
+                // den fsync-schweren Verschieber aushungern und ihn verzögern).
+                thread::yield_now();
+            }
+            runden
+        })
+    };
+
+    // Der **Schreiber** (dieser Thread) macht eine **begrenzte** Zahl Verschiebungen
+    // über die Verzeichnisgrenze — beschränkte, last-unabhängige Laufzeit — und
+    // signalisiert dann das Ende. So besucht die Datei viele Male beide Orte, während
+    // der Leser nebenläufig prüft.
+    for runde in 0..300u64 {
+        if runde.is_multiple_of(2) {
+            b.verschieben(&a_pfad, &b_pfad).unwrap();
+        } else {
+            b.verschieben(&b_pfad, &a_pfad).unwrap();
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+
+    let leser_runden = leser.join().unwrap();
+    assert!(
+        leser_runden > 0,
+        "der Leser lief nicht neben dem Verschieben — Test beweist nichts"
+    );
 }
 
 /// §6.1: der atomare Schreibvorgang (Temp-Datei + `rename`) darf nach Abschluss
