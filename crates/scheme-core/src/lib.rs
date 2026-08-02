@@ -42,11 +42,3 @@ pub use error::{Result, SchemeError};
 pub use index::SchemeIndex;
 pub use model::{Art, Beschreibung, Knoten, Metadaten, Pfad};
 pub use store::{Bestand, EINGANG, LEITFADEN, MANIFEST_NAME};
-
-/// Der Struktur-Leitfaden (§9): der Text, mit dem scheme dem Agenten mitteilt,
-/// dass die Daten klar strukturiert vorliegen und auch so beschrieben werden
-/// müssen. Frei zugänglich (auch ohne offenen Bestand), damit die C-ABI und der
-/// Daemon ihn statisch nach außen reichen können.
-pub fn leitfaden() -> &'static str {
-    LEITFADEN
-}
